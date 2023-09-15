@@ -1,0 +1,12 @@
+apiVersion: transformations.transformations.go/v1alpha1
+kind: Transformation
+metadata:
+  labels:
+    app.kubernetes.io/name: transformation
+    app.kubernetes.io/instance: transformation-sample
+    app.kubernetes.io/part-of: transformation-operator
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: transformation-operator
+  name: transformation-sample
+spec:
+  # TODO(user): Add fields here

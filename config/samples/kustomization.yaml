@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- transformations_v1alpha1_transformation.yaml
+#+kubebuilder:scaffold:manifestskustomizesamples
