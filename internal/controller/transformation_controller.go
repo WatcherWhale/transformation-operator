@@ -19,8 +19,13 @@ package controller
 import (
 	"bytes"
 	"context"
+	"reflect"
 
 	"text/template"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/Masterminds/sprig"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -37,8 +42,8 @@ type TransformationReconciler struct {
 	Scheme *runtime.Scheme
 }
 
-//+kubebuilder:rbac:resources=secrets,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:resources=configmaps,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=transformations.transformations.go,resources=transformations,verbs=get;list;watch;create;update;patch;delete
 //+kubebuilder:rbac:groups=transformations.transformations.go,resources=transformations/status,verbs=get;update;patch
 //+kubebuilder:rbac:groups=transformations.transformations.go,resources=transformations/finalizers,verbs=update
@@ -65,13 +70,22 @@ func (r *TransformationReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	dataMap := make(map[string]map[string]string)
 
 	for _, source := range tf.Spec.Sources {
+		var err error
+		var keyMap map[string]string
+
 		// Load source values
 		switch source.Name {
 		case "ConfigMap":
-			dataMap[source.Name] = make(map[string]string)
+			keyMap, err = r.getConfigMapKeys(source, tf, ctx)
 		case "Secret":
-			dataMap[source.Name] = make(map[string]string)
+			keyMap, err = r.getConfigMapKeys(source, tf, ctx)
 		}
+
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+
+		dataMap[source.Name] = keyMap
 	}
 
 	templater := template.New("gotpl").Funcs(sprig.FuncMap())
@@ -98,15 +112,91 @@ func (r *TransformationReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		templatedMap[key] = buf.String()
 	}
 
+	if err := r.reconcileConfigMap(templatedMap, tf, ctx); err != nil {
+		logger.Error(err, "Failed to update/create configmap")
+		return ctrl.Result{}, err
+	}
+
 	return ctrl.Result{}, nil
 }
 
-func (r *TransformationReconciler) getConfigMapKeys(ctx context.Context) map[string]string {
-	return make(map[string]string)
+func (r *TransformationReconciler) reconcileConfigMap(data map[string]string, tf transformationsv1alpha1.Transformation, ctx context.Context) error {
+	configMap := corev1.ConfigMap{}
+
+	if err := r.Get(ctx, client.ObjectKey{Namespace: tf.Namespace, Name: tf.Spec.Target.Name}, &configMap); err != nil {
+
+		if apierrors.IsNotFound(err) {
+			configMap = corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:            tf.Spec.Target.Name,
+					Namespace:       tf.Namespace,
+					Labels:          tf.Spec.Target.Labels,
+					Annotations:     tf.Spec.Target.Annotations,
+					OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(&tf, transformationsv1alpha1.GroupVersion.WithKind("Transformation"))},
+				},
+				Data: data,
+			}
+
+			if err := r.Create(ctx, &configMap); err != nil {
+				return err
+			}
+
+			return nil
+
+		} else {
+			return err
+		}
+	}
+	changed := false
+
+	if !reflect.DeepEqual(configMap.Labels, tf.Spec.Target.Labels) {
+		configMap.Labels = tf.Spec.Target.Labels
+		changed = true
+	}
+
+	if !reflect.DeepEqual(configMap.Annotations, tf.Spec.Target.Annotations) {
+		configMap.Annotations = tf.Spec.Target.Labels
+		changed = true
+	}
+
+	if !reflect.DeepEqual(configMap.Data, data) {
+		configMap.Data = data
+		changed = true
+	}
+
+	if changed {
+		if err := r.Update(ctx, &configMap); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
-func (r *TransformationReconciler) getSecretKeys(ctx context.Context) map[string]string {
-	return make(map[string]string)
+func (r *TransformationReconciler) getConfigMapKeys(src transformationsv1alpha1.SourceSpec, tf transformationsv1alpha1.Transformation, ctx context.Context) (map[string]string, error) {
+	configMap := corev1.ConfigMap{}
+
+	if err := r.Get(ctx, client.ObjectKey{Namespace: tf.Namespace, Name: src.Name}, &configMap); err != nil {
+		return nil, client.IgnoreNotFound(err)
+	}
+
+	return configMap.Data, nil
+}
+
+func (r *TransformationReconciler) getSecretKeys(src transformationsv1alpha1.SourceSpec, tf transformationsv1alpha1.Transformation, ctx context.Context) (map[string]string, error) {
+	secret := corev1.Secret{}
+
+	if err := r.Get(ctx, client.ObjectKey{Namespace: tf.Namespace, Name: src.Name}, &secret); err != nil {
+		return nil, client.IgnoreNotFound(err)
+	}
+
+	dataMap := make(map[string]string)
+
+	for key, buf := range secret.Data {
+		dataMap[key] = string(buf)
+	}
+
+	return dataMap, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
